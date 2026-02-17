@@ -1417,10 +1417,19 @@ def notify_client_sms(client_id, app_name, user_name, user_phone):
     if not twilio_client:
         return
 
-    client = db.clients.find_one({"email": client_id}) # client_id is often the email in this app
+    # Try identification by Email, then direct String ID, then ObjectId
+    client = db.clients.find_one({"email": str(client_id)})
     if not client:
-        # Try finding by name or other identifier if email lookup fails
-        client = db.clients.find_one({"_id": ObjectId(client_id)}) if len(client_id) == 24 else None
+        client = db.clients.find_one({"_id": str(client_id)})
+    if not client and len(str(client_id)) == 24:
+        try:
+            client = db.clients.find_one({"_id": ObjectId(client_id)})
+        except:
+            pass
+
+    if not client:
+        logger.warning(f"⚠️ Could not find client in DB with ID: {client_id}")
+        return
 
     client_phone = client.get("phone") or client.get("number")
 
