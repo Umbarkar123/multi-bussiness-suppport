@@ -931,10 +931,19 @@ def update_status(id, status):
     if "role" not in session or session["role"] != "CLIENT":
         return redirect("/login")
 
-    collection.update_one(
+    # Fetch booking details for notification
+    booking = db.call_requests.find_one({"_id": ObjectId(id)})
+    
+    db.call_requests.update_one(
         {"_id": ObjectId(id)},
         {"$set": {"status": status}}
     )
+
+    # Send Notification if status is APPROVED or REJECTED
+    if booking and status in ["APPROVED", "REJECTED"]:
+        phone = booking.get("phone")
+        app_name = booking.get("app_name", "your request")
+        send_status_sms(phone, status, app_name)
 
     return redirect("/analytics")
 
@@ -1265,15 +1274,33 @@ def delete_application(app_name):
 
 @app.route("/submit/<app_name>", methods=["POST"])
 def submit_form(app_name):
-
     data = dict(request.form)
-
+    
+    # Standardize data for unified "Booking Details" view
     data["app_name"] = app_name
+    data["status"] = "PENDING"
     data["created_at"] = datetime.utcnow()
+    
+    # Try to extract name and phone from dynamic form fields for consistent UI
+    if not data.get("name"):
+        # Look for name-like fields
+        for k, v in data.items():
+            if "name" in k.lower():
+                data["name"] = v
+                break
+                
+    if not data.get("phone"):
+        # Look for phone-like fields
+        for k, v in data.items():
+            if "phone" in k.lower() or "mobile" in k.lower() or "contact" in k.lower():
+                data["phone"] = v
+                break
 
-    db.submissions.insert_one(data)
+    # Insert into unified collection
+    db.call_requests.insert_one(data)
 
-    return redirect(f"/client/application/{app_name}/open")
+    return render_template("success.html", message="Your request has been submitted successfully!")
+
 
 # @app.route("/booking_data")
 # def booking_data():
@@ -1316,32 +1343,74 @@ from bson import ObjectId
 
 
 
+def send_status_sms(phone, status, app_name):
+    """Sends a Twilio SMS when a booking is approved or rejected."""
+    if not twilio_client or not phone:
+        logger.warning("Twilio not configured or phone missing - skipping SMS.")
+        return
+
+    # Standardize phone format (+91 for India if exactly 10 digits)
+    clean_phone = "".join(filter(str.isdigit, str(phone)))
+    if len(clean_phone) == 10:
+        target_phone = "+91" + clean_phone
+    elif clean_phone.startswith("91") and len(clean_phone) == 12:
+        target_phone = "+" + clean_phone
+    elif not str(phone).startswith("+"):
+        target_phone = "+" + clean_phone
+    else:
+        target_phone = str(phone)
+
+    msg_body = f"Hello! Your request for {app_name} has been {status}. Thank you for using ConnexHub!"
+    
+    try:
+        twilio_client.messages.create(
+            body=msg_body,
+            from_=TWILIO_PHONE_NUMBER,
+            to=target_phone
+        )
+        logger.info(f"SMS sent to {target_phone} for status {status}")
+    except Exception as e:
+        logger.error(f"Failed to send SMS to {target_phone}: {e}")
+
 # APPROVE
 @app.route("/approve/<id>")
 def approve_booking(id):
+    booking = db.call_requests.find_one({"_id": ObjectId(id)})
+    if not booking:
+        return redirect(url_for("booking_data"))
+
     db.call_requests.update_one(
         {"_id": ObjectId(id)},
         {"$set": {"status": "APPROVED"}}
     )
+
+    # Send Notification
+    phone = booking.get("phone")
+    app_name = booking.get("app_name", "your request")
+    send_status_sms(phone, "APPROVED", app_name)
+
     return redirect(url_for("booking_data"))
 
 
 # REJECT
 @app.route("/reject/<id>")
 def reject_booking(id):
+    booking = db.call_requests.find_one({"_id": ObjectId(id)})
+    if not booking:
+        return redirect(url_for("booking_data"))
+
     db.call_requests.update_one(
         {"_id": ObjectId(id)},
         {"$set": {"status": "REJECTED"}}
     )
+
+    # Send Notification
+    phone = booking.get("phone")
+    app_name = booking.get("app_name", "your request")
+    send_status_sms(phone, "REJECTED", app_name)
+
     return redirect(url_for("booking_data"))
 
-@app.route("/reject-submission/<id>")
-def reject_submission(id):
-    db.form_submissions.update_one(
-        {"_id": ObjectId(id)},
-        {"$set": {"status": "REJECTED"}}
-    )
-    return redirect("/booking-data")
 
 
 @app.route("/api/submit/<api_key>", methods=["POST"])
