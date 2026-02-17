@@ -1,0 +1,39 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<h2>Calls for {{ client.company_name }}</h2>
+
+<div class="card full">
+    <table class="calls-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Phone</th>
+                <th>Call Initiated</th>
+                <th>Time</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in calls %}
+            <tr>
+                <td>{{ row.name }}</td>
+                <td>{{ row.phone }}</td>
+                <td>
+                    {% if row.call_initiated or row.call_initiated_at %}
+                    <span style="color: #22c55e; font-weight: 600;">✓ Yes</span>
+                    {% else %}
+                    <span style="color: #94a3b8;">✕ No</span>
+                    {% endif %}
+                </td>
+                <td>{{ row.time }}</td>
+                <td>{{ row.status }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<a href="/admin/calls" class="copy-btn">⬅ Back to Clients</a>
+
+{% endblock %}

@@ -1,0 +1,20 @@
+﻿# Environments
+.env
+.env.*
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDEs
+.idea/
+.vscode/
+
+# Logs
+*.log
+push_error.txt

@@ -1,0 +1,133 @@
+{% extends base_template|default("public_base.html") %}
+{% block content %}
+
+<div class="form-card">
+
+    <h2 class="form-title">{{ app_name }} Form</h2>
+
+    <form method="POST" action="/api/submit/{{ api_key }}">
+
+        {% for f in fields %}
+        <div class="form-group">
+            <label>{{ f.label }}</label>
+
+            {% if f.type == "textarea" %}
+            <textarea name="{{ f.name }}" placeholder="{{ f.placeholder }}"></textarea>
+            {% elif f.type == "select" %}
+            <select name="{{ f.name }}">
+                {% for option in f.placeholder.split(',') %}
+                <option value="{{ option.strip() }}">{{ option.strip() }}</option>
+                {% endfor %}
+            </select>
+            {% elif f.type == "checkbox" %}
+            <div class="form-check">
+                <input type="checkbox" name="{{ f.name }}" id="check_{{ loop.index }}">
+                <label for="check_{{ loop.index }}">{{ f.label }}</label>
+            </div>
+            {% elif f.type == "radio" %}
+            {% for option in f.placeholder.split(',') %}
+            <div class="form-radio">
+                <input type="radio" name="{{ f.name }}" value="{{ option.strip() }}"
+                    id="radio_{{ loop.index0 }}_{{ loop.index }}">
+                <label for="radio_{{ loop.index0 }}_{{ loop.index }}">{{ option.strip() }}</label>
+            </div>
+            {% endfor %}
+            {% else %}
+            <input type="{{ f.type }}" name="{{ f.name }}" placeholder="{{ f.placeholder }}">
+            {% endif %}
+        </div>
+        {% endfor %}
+
+        <button type="submit" class="submit-btn" id="submitBtn">Submit</button>
+
+    </form>
+
+</div>
+
+<style>
+    .form-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        padding: 32px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+        width: 100%;
+        max-width: 420px;
+        margin: 40px auto;
+    }
+
+    .form-title {
+        font-size: 22px;
+        font-weight: 700;
+        margin-bottom: 24px;
+        color: var(--text-bright);
+        text-align: center;
+    }
+
+    .form-group {
+        margin-bottom: 20px;
+    }
+
+    .form-group label {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 6px;
+        color: var(--text-dim);
+        font-weight: 500;
+    }
+
+    .form-group input,
+    .form-group textarea,
+    .form-group select {
+        width: 100%;
+        padding: 10px 14px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-color);
+        background: var(--bg-input);
+        color: var(--text-bright);
+        font-size: 13px;
+        box-sizing: border-box;
+        transition: border-color .2s;
+    }
+
+    .form-group input:focus,
+    .form-group textarea:focus {
+        outline: none;
+        border-color: var(--primary);
+    }
+
+    .form-check,
+    .form-radio {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+    }
+
+    .form-check input,
+    .form-radio input {
+        width: auto;
+        margin: 0;
+    }
+
+    .submit-btn {
+        width: 100%;
+        margin-top: 14px;
+        padding: 12px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: var(--primary);
+        color: white;
+        font-weight: 700;
+        font-size: 15px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    .submit-btn:hover {
+        opacity: 0.9;
+        transform: translateY(-1px);
+    }
+</style>
+
+{% endblock %}
