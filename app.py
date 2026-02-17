@@ -166,20 +166,19 @@ def request_call():
 
     # ===== Insert ONCE and get call id =====
     result = collection.insert_one(data)
-    call_id = str(result.inserted_id)
+    # call_id = str(result.inserted_id)
 
-    # ===== Twilio call using dynamic phone =====
-    phone_number = data.get("phone")
-
-    if phone_number and twilio_client:
-        try:
-            twilio_client.calls.create(
-                to=phone_number,
-                from_=TWILIO_PHONE_NUMBER,
-                url=f"{RETELL_WEBHOOK}?call_id={call_id}"
-            )
-        except Exception as e:
-            logger.error(f"Error initiating Twilio call: {e}")
+    # ===== Twilio call using dynamic phone (DISABLED PER USER REQUEST - SMS ONLY ON APPROVAL) =====
+    # phone_number = data.get("phone")
+    # if phone_number and twilio_client:
+    #     try:
+    #         twilio_client.calls.create(
+    #             to=phone_number,
+    #             from_=TWILIO_PHONE_NUMBER,
+    #             url=f"{RETELL_WEBHOOK}?call_id={call_id}"
+    #         )
+    #     except Exception as e:
+    #         logger.error(f"Error initiating Twilio call: {e}")
 
     return jsonify({"status": "ok"})
 
@@ -943,7 +942,23 @@ def update_status(id, status):
     if booking and status in ["APPROVED", "REJECTED"]:
         phone = booking.get("phone")
         app_name = booking.get("app_name", "your request")
-        send_status_sms(phone, status, app_name)
+        user_name = booking.get("name", booking.get("user_name", "Customer"))
+        send_status_sms(phone, status, app_name, user_name)
+
+        # Trigger Call if Approved
+        if status == "APPROVED" and phone and twilio_client:
+            try:
+                clean_phone = "".join(filter(str.isdigit, str(phone)))
+                target_phone = "+91" + clean_phone if len(clean_phone) == 10 else ("+" + clean_phone if not str(phone).startswith("+") else str(phone))
+                
+                twilio_client.calls.create(
+                    to=target_phone,
+                    from_=TWILIO_PHONE_NUMBER,
+                    url=f"{RETELL_WEBHOOK}?call_id={id}&app_name={app_name}",
+                )
+                logger.info(f"✅ Triggered status-update call to {target_phone}")
+            except Exception as e:
+                logger.error(f"❌ Failed to trigger status-update call: {e}")
 
     return redirect("/analytics")
 
@@ -1276,28 +1291,39 @@ def delete_application(app_name):
 def submit_form(app_name):
     data = dict(request.form)
     
+    # Try to find client_id for this app
+    form_config = db.form_builders.find_one({"app_name": app_name})
+    client_id = form_config.get("client_id") if form_config else session.get("client_id")
+
     # Standardize data for unified "Booking Details" view
     data["app_name"] = app_name
+    data["client_id"] = client_id
     data["status"] = "PENDING"
     data["created_at"] = datetime.utcnow()
     
-    # Try to extract name and phone from dynamic form fields for consistent UI
-    if not data.get("name"):
-        # Look for name-like fields
-        for k, v in data.items():
-            if "name" in k.lower():
-                data["name"] = v
-                break
-                
-    if not data.get("phone"):
-        # Look for phone-like fields
-        for k, v in data.items():
-            if "phone" in k.lower() or "mobile" in k.lower() or "contact" in k.lower():
-                data["phone"] = v
-                break
+    # Try to extract name, phone, and time from dynamic form fields
+    extracted_name = "Unknown"
+    extracted_phone = "N/A"
+    extracted_time = ""
+
+    for k, v in data.items():
+        low_k = k.lower()
+        if not data.get("name") and "name" in low_k:
+            extracted_name = v
+            data["name"] = v
+        if not data.get("phone") and ("phone" in low_k or "mobile" in low_k or "contact" in low_k):
+            extracted_phone = v
+            data["phone"] = v
+        if not data.get("time") and ("time" in low_k or "booking" in low_k or "slot" in low_k):
+            extracted_time = v
+            data["time"] = v
 
     # Insert into unified collection
     db.call_requests.insert_one(data)
+
+    # Notify Client
+    if client_id:
+        notify_client_sms(client_id, app_name, extracted_name, extracted_phone)
 
     return render_template("success.html", message="Your request has been submitted successfully!")
 
@@ -1343,8 +1369,8 @@ from bson import ObjectId
 
 
 
-def send_status_sms(phone, status, app_name):
-    """Sends a Twilio SMS when a booking is approved or rejected."""
+def send_status_sms(phone, status, app_name, user_name="Customer"):
+    """Sends a professional, personalized Twilio SMS."""
     if not twilio_client or not phone:
         logger.warning("Twilio not configured or phone missing - skipping SMS.")
         return
@@ -1360,7 +1386,11 @@ def send_status_sms(phone, status, app_name):
     else:
         target_phone = str(phone)
 
-    msg_body = f"Hello! Your request for {app_name} has been {status}. Thank you for using ConnexHub!"
+    # Impressive, personalized message
+    if status == "APPROVED":
+        msg_body = f"High five, {user_name}! 🚀 Your request for '{app_name}' has been APPROVED. We are excited to move forward with you! - ConnexHub"
+    else:
+        msg_body = f"Hello {user_name}, thank you for your interest in '{app_name}'. Your request has been REJECTED at this time. We wish you the best! - ConnexHub"
     
     try:
         twilio_client.messages.create(
@@ -1368,9 +1398,46 @@ def send_status_sms(phone, status, app_name):
             from_=TWILIO_PHONE_NUMBER,
             to=target_phone
         )
-        logger.info(f"SMS sent to {target_phone} for status {status}")
+        logger.info(f"Enhanced SMS sent to {target_phone} for {user_name}")
     except Exception as e:
         logger.error(f"Failed to send SMS to {target_phone}: {e}")
+
+def notify_client_sms(client_id, app_name, user_name, user_phone):
+    """Notifies the business owner (Client) about a new booking request."""
+    if not twilio_client:
+        return
+
+    client = db.clients.find_one({"email": client_id}) # client_id is often the email in this app
+    if not client:
+        # Try finding by name or other identifier if email lookup fails
+        client = db.clients.find_one({"_id": ObjectId(client_id)}) if len(client_id) == 24 else None
+
+    if not client or not client.get("phone"):
+        logger.warning(f"Could not find phone for client {client_id}")
+        return
+
+    client_phone = client.get("phone")
+    
+    # Standardize phone format
+    clean_phone = "".join(filter(str.isdigit, str(client_phone)))
+    if len(clean_phone) == 10:
+        target_phone = "+91" + clean_phone
+    elif not str(client_phone).startswith("+"):
+        target_phone = "+" + clean_phone
+    else:
+        target_phone = client_phone
+
+    msg_body = f"ConnexHub Alert: ⚡ You have a new booking request from {user_name} ({user_phone}) for {app_name}. Visit your dashboard to approve it!"
+
+    try:
+        twilio_client.messages.create(
+            body=msg_body,
+            from_=TWILIO_PHONE_NUMBER,
+            to=target_phone
+        )
+        logger.info(f"Client {client_id} notified of new request from {user_name}")
+    except Exception as e:
+        logger.error(f"Failed to notify client {client_id}: {e}")
 
 # APPROVE
 @app.route("/approve/<id>")
@@ -1387,7 +1454,24 @@ def approve_booking(id):
     # Send Notification
     phone = booking.get("phone")
     app_name = booking.get("app_name", "your request")
-    send_status_sms(phone, "APPROVED", app_name)
+    user_name = booking.get("name", booking.get("user_name", "Customer"))
+    send_status_sms(phone, "APPROVED", app_name, user_name)
+
+    # Trigger Automated Call upon Approval
+    if phone and twilio_client:
+        try:
+            # Standardize phone format (+91 for India if exactly 10 digits)
+            clean_phone = "".join(filter(str.isdigit, str(phone)))
+            target_phone = "+91" + clean_phone if len(clean_phone) == 10 else ("+" + clean_phone if not str(phone).startswith("+") else str(phone))
+            
+            twilio_client.calls.create(
+                to=target_phone,
+                from_=TWILIO_PHONE_NUMBER,
+                url=f"{RETELL_WEBHOOK}?call_id={id}&app_name={app_name}",
+            )
+            logger.info(f"✅ Triggered approval call for {app_name} to {target_phone}")
+        except Exception as e:
+            logger.error(f"❌ Failed to trigger approval call: {e}")
 
     return redirect(url_for("booking_data"))
 
@@ -1407,7 +1491,8 @@ def reject_booking(id):
     # Send Notification
     phone = booking.get("phone")
     app_name = booking.get("app_name", "your request")
-    send_status_sms(phone, "REJECTED", app_name)
+    user_name = booking.get("name", booking.get("user_name", "Customer"))
+    send_status_sms(phone, "REJECTED", app_name, user_name)
 
     return redirect(url_for("booking_data"))
 
@@ -1439,6 +1524,8 @@ def api_submit(api_key):
     name_field_name = ""
     phone_label = ""
     phone_field_name = ""
+    time_label = ""
+    time_field_name = ""
     
     for field in fields:
         label_text = field.get("label", "").lower()
@@ -1453,6 +1540,11 @@ def api_submit(api_key):
         if "name" in label_text or "name" in field_name:
             name_label = field.get("label")
             name_field_name = field.get("name")
+
+        # Check for time
+        if "time" in label_text or "time" in field_name or "slot" in label_text or "booking" in label_text:
+            time_label = field.get("label")
+            time_field_name = field.get("name")
 
     # Log what we found for debugging
     logger.info(f"📝 Form fields detected - Name label: '{name_label}', Name field: '{name_field_name}', Phone label: '{phone_label}', Phone field: '{phone_field_name}'")
@@ -1472,6 +1564,12 @@ def api_submit(api_key):
         phone_num = data.get(phone_label)
     elif phone_field_name and phone_field_name in data:
         phone_num = data.get(phone_field_name)
+
+    extracted_time = ""
+    if time_label and time_label in data:
+        extracted_time = data.get(time_label)
+    elif time_field_name and time_field_name in data:
+        extracted_time = data.get(time_field_name)
     
     # Fallback to common field names if labels didn't work
     if not user_name:
@@ -1487,6 +1585,13 @@ def api_submit(api_key):
                 phone_num = data[key]
                 logger.info(f"✅ Found phone via fallback key: '{key}' = '{phone_num}'")
                 break
+
+    if not extracted_time:
+        for key in ["time", "booking", "slot", "booking time", "preferred time"]:
+            for dk in data.keys():
+                if key in dk.lower():
+                    extracted_time = data[dk]
+                    break
 
     # Clean and validate phone number
     if phone_num:
@@ -1548,57 +1653,61 @@ def api_submit(api_key):
         "app_name": app_name,
         "name": display_name,
         "phone": display_phone,
+        "time": extracted_time,
         "data": data,  # All form fields
         "ai_reply": ai_reply,
         "query": ai_reply[:100] if ai_reply else "",  # Short summary for table view
         "status": "PENDING",
-        "time": datetime.now().strftime("%H:%M"),
+        "time_str": datetime.now().strftime("%H:%M"),
         "created_at": datetime.now(),
         "createdAt": datetime.now()  # For backward compatibility
     }
     call_req_result = db.call_requests.insert_one(call_request)
     call_id = str(call_req_result.inserted_id)
 
+    # Notify Client
+    notify_client_sms(client_id, app_name, display_name, display_phone)
+
     # ==========================================
-    # 🔥 STEP 4: TRIGGER VOICE CALL IF VALID PHONE EXISTS
+    # 🔥 STEP 4: TRIGGER VOICE CALL (DISABLED PER USER REQUEST - SMS ONLY ON APPROVAL)
     # ==========================================
     call_initiated = False
     call_error = None
     
-    if phone_num and twilio_client:
-        try:
-            # Ensure phone has country code
-            if not phone_num.startswith('+'):
-                phone_num = '+91' + phone_num  # Default to India, adjust as needed
-            
-            twilio_client.calls.create(
-                to=phone_num,
-                from_=TWILIO_PHONE_NUMBER,
-                url=f"{RETELL_WEBHOOK}?call_id={call_id}&app_name={app_name}",
-            )
-            
-            # Track call initiation WITHOUT changing status (keep as PENDING for approval)
-            db.call_requests.update_one(
-                {"_id": call_req_result.inserted_id},
-                {"$set": {"call_initiated": True, "call_initiated_at": datetime.now()}}
-            )
-            
-            call_initiated = True
-            logger.info(f"✅ Triggered automated call for {app_name} to {phone_num}")
-            
-        except Exception as e:
-            call_error = str(e)
-            logger.error(f"❌ Failed to trigger automated call: {e}")
-            
-            # Track call failure WITHOUT changing status
-            db.call_requests.update_one(
-                {"_id": call_req_result.inserted_id},
-                {"$set": {"call_initiated": False, "call_error": call_error}}
-            )
-    elif not phone_num:
-        logger.warning(f"⚠️ No valid phone number provided for {app_name}")
-    elif not twilio_client:
-        logger.warning(f"⚠️ Twilio client not initialized - calls disabled")
+    # if phone_num and twilio_client:
+    #     try:
+    #         # Ensure phone has country code
+    #         if not phone_num.startswith('+'):
+    #             phone_num = '+91' + phone_num  # Default to India
+    #         
+    #         twilio_client.calls.create(
+    #             to=phone_num,
+    #             from_=TWILIO_PHONE_NUMBER,
+    #             url=f"{RETELL_WEBHOOK}?call_id={call_id}&app_name={app_name}",
+    #         )
+    #         
+    #         # Track call initiation WITHOUT changing status (keep as PENDING for approval)
+    #         db.call_requests.update_one(
+    #             {"_id": call_req_result.inserted_id},
+    #             {"$set": {"call_initiated": True, "call_initiated_at": datetime.now()}}
+    #         )
+    #         
+    #         call_initiated = True
+    #         logger.info(f"✅ Triggered automated call for {app_name} to {phone_num}")
+    #         
+    #     except Exception as e:
+    #         call_error = str(e)
+    #         logger.error(f"❌ Failed to trigger automated call: {e}")
+    #         
+    #         # Track call failure WITHOUT changing status
+    #         db.call_requests.update_one(
+    #             {"_id": call_req_result.inserted_id},
+    #             {"$set": {"call_initiated": False, "call_error": call_error}}
+    #         )
+    # elif not phone_num:
+    #     logger.warning(f"⚠️ No valid phone number provided for {app_name}")
+    # elif not twilio_client:
+    #     logger.warning(f"⚠️ Twilio client not initialized - calls disabled")
 
     # ==========================================
     # 🔥 STEP 5: RETURN RESPONSE
@@ -1868,15 +1977,39 @@ def llm_settings():
 
 @app.route("/client/update_booking_status", methods=["POST"])
 def update_booking_status():
-
     data = request.get_json()
     booking_id = data.get("id")
     status = data.get("status")
 
-    db.form_submissions.update_one(
+    # Fetch booking details for notification
+    booking = db.call_requests.find_one({"_id": ObjectId(booking_id)})
+
+    db.call_requests.update_one(
         {"_id": ObjectId(booking_id)},
         {"$set": {"status": status}}
     )
+
+    # Send Notification if status is APPROVED or REJECTED
+    if booking and status in ["APPROVED", "REJECTED"]:
+        phone = booking.get("phone")
+        app_name = booking.get("app_name", "your request")
+        user_name = booking.get("name", booking.get("user_name", "Customer"))
+        send_status_sms(phone, status, app_name, user_name)
+
+        # Trigger Call if Approved
+        if status == "APPROVED" and phone and twilio_client:
+            try:
+                clean_phone = "".join(filter(str.isdigit, str(phone)))
+                target_phone = "+91" + clean_phone if len(clean_phone) == 10 else ("+" + clean_phone if not str(phone).startswith("+") else str(phone))
+                
+                twilio_client.calls.create(
+                    to=target_phone,
+                    from_=TWILIO_PHONE_NUMBER,
+                    url=f"{RETELL_WEBHOOK}?call_id={booking_id}&app_name={app_name}",
+                )
+                logger.info(f"✅ Triggered AJAX-update call to {target_phone}")
+            except Exception as e:
+                logger.error(f"❌ Failed to trigger AJAX-update call: {e}")
 
     return jsonify({"success": True})
 
